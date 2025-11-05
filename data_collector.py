@@ -1,0 +1,262 @@
+"""
+Data collection and analysis functions for the Morty Express Challenge.
+"""
+
+import pandas as pd
+import numpy as np
+from typing import List, Dict, Tuple
+from api_client import SphinxAPIClient
+
+
+class DataCollector:
+    """Collects and analyzes data from the challenge."""
+    
+    def __init__(self, client: SphinxAPIClient):
+        """
+        Initialize the data collector.
+        
+        Args:
+            client: SphinxAPIClient instance
+        """
+        self.client = client
+        self.trips_data = []
+    
+    def explore_planet(self, planet: int, num_trips: int, morty_count: int = 1) -> pd.DataFrame:
+        """
+        Send multiple trips to a single planet to observe its behavior.
+        
+        Args:
+            planet: Planet index (0, 1, or 2)
+            num_trips: Number of trips to make
+            morty_count: Number of Morties per trip (1-3)
+            
+        Returns:
+            DataFrame with trip data
+        """
+        print(f"\nExploring {self.client.get_planet_name(planet)}...")
+        print(f"Sending {num_trips} trips with {morty_count} Morties each")
+        
+        trips = []
+        
+        for i in range(num_trips):
+            try:
+                result = self.client.send_morties(planet, morty_count)
+                
+                trip_data = {
+                    'trip_number': i + 1,
+                    'planet': planet,
+                    'planet_name': self.client.get_planet_name(planet),
+                    'morties_sent': result['morties_sent'],
+                    'survived': result['survived'],
+                    'steps_taken': result['steps_taken'],
+                    'morties_in_citadel': result['morties_in_citadel'],
+                    'morties_on_planet_jessica': result['morties_on_planet_jessica'],
+                    'morties_lost': result['morties_lost']
+                }
+                
+                trips.append(trip_data)
+                self.trips_data.append(trip_data)
+                
+                if (i + 1) % 10 == 0:
+                    print(f"  Completed {i + 1}/{num_trips} trips")
+                
+            except Exception as e:
+                print(f"Error on trip {i + 1}: {e}")
+                break
+        
+        df = pd.DataFrame(trips)
+        
+        if len(df) > 0:
+            survival_rate = df['survived'].mean() * 100
+            print(f"\nResults for {self.client.get_planet_name(planet)}:")
+            print(f"  Survival Rate: {survival_rate:.2f}%")
+            print(f"  Trips Completed: {len(df)}")
+            print(f"  Morties Saved: {df['survived'].sum() * morty_count}")
+            print(f"  Morties Lost: {df['morties_lost'].iloc[-1]}")
+        
+        return df
+    
+    def explore_all_planets(self, trips_per_planet: int = 30, morty_count: int = 1) -> pd.DataFrame:
+        """
+        Explore all three planets to compare their behaviors.
+        
+        Args:
+            trips_per_planet: Number of trips to make to each planet
+            morty_count: Number of Morties per trip
+            
+        Returns:
+            Combined DataFrame with all trip data
+        """
+        print("\n" + "="*60)
+        print("EXPLORING ALL PLANETS")
+        print("="*60)
+        
+        # Start a new episode
+        self.client.start_episode()
+        self.trips_data = []
+        
+        all_data = []
+        
+        for planet in [0, 1, 2]:
+            df = self.explore_planet(planet, trips_per_planet, morty_count)
+            all_data.append(df)
+        
+        combined_df = pd.concat(all_data, ignore_index=True)
+        
+        print("\n" + "="*60)
+        print("SUMMARY ACROSS ALL PLANETS")
+        print("="*60)
+        
+        summary = combined_df.groupby('planet_name').agg({
+            'survived': ['sum', 'mean', 'count']
+        })
+        
+        for planet_name in combined_df['planet_name'].unique():
+            planet_data = combined_df[combined_df['planet_name'] == planet_name]
+            survival_rate = planet_data['survived'].mean() * 100
+            total_saved = planet_data['survived'].sum() * morty_count
+            
+            print(f"\n{planet_name}:")
+            print(f"  Survival Rate: {survival_rate:.2f}%")
+            print(f"  Morties Saved: {total_saved}")
+            print(f"  Trips: {len(planet_data)}")
+        
+        return combined_df
+    
+    def calculate_moving_average(self, df: pd.DataFrame, window: int = 10) -> pd.DataFrame:
+        """
+        Calculate moving average of survival rates for each planet.
+        
+        Args:
+            df: DataFrame with trip data
+            window: Window size for moving average
+            
+        Returns:
+            DataFrame with moving averages
+        """
+        result = df.copy()
+        
+        for planet in df['planet'].unique():
+            mask = result['planet'] == planet
+            planet_survived = result.loc[mask, 'survived'].astype(int)
+            result.loc[mask, 'survival_ma'] = planet_survived.rolling(
+                window=window, min_periods=1
+            ).mean()
+        
+        return result
+    
+    def analyze_risk_changes(self, df: pd.DataFrame) -> Dict:
+        """
+        Analyze how risk changes over time for each planet.
+        
+        Args:
+            df: DataFrame with trip data
+            
+        Returns:
+            Dictionary with risk analysis for each planet
+        """
+        analysis = {}
+        
+        for planet in df['planet'].unique():
+            planet_data = df[df['planet'] == planet].copy()
+            planet_name = planet_data['planet_name'].iloc[0]
+            
+            # Split into early and late trips
+            mid_point = len(planet_data) // 2
+            early = planet_data.iloc[:mid_point]
+            late = planet_data.iloc[mid_point:]
+            
+            early_survival = early['survived'].mean()
+            late_survival = late['survived'].mean()
+            change = late_survival - early_survival
+            
+            analysis[planet_name] = {
+                'planet': planet,
+                'early_survival_rate': early_survival * 100,
+                'late_survival_rate': late_survival * 100,
+                'change': change * 100,
+                'trend': 'improving' if change > 0 else 'worsening',
+                'total_trips': len(planet_data),
+                'overall_survival_rate': planet_data['survived'].mean() * 100
+            }
+        
+        return analysis
+    
+    def get_best_planet(self, df: pd.DataFrame, consider_trend: bool = True) -> Tuple[int, str]:
+        """
+        Determine the best planet to use based on collected data.
+        
+        Args:
+            df: DataFrame with trip data
+            consider_trend: Whether to consider trend in addition to survival rate
+            
+        Returns:
+            Tuple of (planet_index, planet_name)
+        """
+        if consider_trend:
+            analysis = self.analyze_risk_changes(df)
+            
+            # Score based on late survival rate (more recent data)
+            best_planet = max(
+                analysis.items(),
+                key=lambda x: x[1]['late_survival_rate']
+            )
+            
+            planet_name = best_planet[0]
+            planet_index = int(best_planet[1]['planet'])  # Convert to Python int
+            
+        else:
+            # Simple overall survival rate
+            planet_rates = df.groupby(['planet', 'planet_name'])['survived'].mean()
+            best = planet_rates.idxmax()
+            planet_index, planet_name = best
+            planet_index = int(planet_index)  # Convert to Python int
+        
+        return planet_index, planet_name
+    
+    def save_data(self, filename: str = "trips_data.csv"):
+        """
+        Save collected trip data to a CSV file.
+        
+        Args:
+            filename: Name of the CSV file
+        """
+        if self.trips_data:
+            df = pd.DataFrame(self.trips_data)
+            df.to_csv(filename, index=False)
+            print(f"\nData saved to {filename}")
+        else:
+            print("No data to save")
+    
+    def load_data(self, filename: str = "trips_data.csv") -> pd.DataFrame:
+        """
+        Load trip data from a CSV file.
+        
+        Args:
+            filename: Name of the CSV file
+            
+        Returns:
+            DataFrame with trip data
+        """
+        df = pd.read_csv(filename)
+        self.trips_data = df.to_dict('records')
+        print(f"\nLoaded {len(df)} trips from {filename}")
+        return df
+
+
+if __name__ == "__main__":
+    # Example usage
+    from api_client import SphinxAPIClient
+    
+    try:
+        client = SphinxAPIClient()
+        collector = DataCollector(client)
+        
+        print("Data Collector initialized!")
+        print("\nTo explore planets, run:")
+        print("  df = collector.explore_all_planets(trips_per_planet=30)")
+        print("\nOr explore a single planet:")
+        print("  df = collector.explore_planet(planet=0, num_trips=50)")
+        
+    except Exception as e:
+        print(f"Error: {e}")
