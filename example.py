@@ -30,7 +30,7 @@ def main():
     # Step 1: Initialize the API client
     print("\n1. Initializing API client...")
     try:
-        client = SphinxAPIClient()
+        client = SphinxAPIClient("cba33279ddcd75e628f59b6b48674f8059b5bb75")
         print("✓ API client initialized successfully!")
     except ValueError as e:
         print(f"✗ Error: {e}")

@@ -249,7 +249,7 @@ if __name__ == "__main__":
     from api_client import SphinxAPIClient
     
     try:
-        client = SphinxAPIClient()
+        client = SphinxAPIClient("cba33279ddcd75e628f59b6b48674f8059b5bb75")
         collector = DataCollector(client)
         
         print("Data Collector initialized!")
