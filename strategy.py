@@ -12,12 +12,14 @@ changing conditions.
 from api_client import SphinxAPIClient
 from data_collector import DataCollector
 import pandas as pd
-import random
 import numpy as np
-import torch
 import torch.nn as nn
 import torch.optim as optim
 from collections import namedtuple, deque
+import matplotlib.pyplot as plt
+from typing import List
+import seaborn as sns
+import os
 
 class MortyRescueStrategy:
     """Base class for implementing rescue strategies."""
@@ -71,336 +73,306 @@ class MortyRescueStrategy:
         raise NotImplementedError("Implement your strategy in a subclass")
 
 
-class SimpleGreedyStrategy(MortyRescueStrategy):
-    """
-    Simple greedy strategy: always pick the planet with highest recent success.
-    """
-    
-    def execute_strategy(self, morties_per_trip: int = 3):
-        """
-        Execute the greedy strategy.
-        
-        Args:
-            morties_per_trip: Number of Morties to send per trip (1-3)
-        """
-        print("\n=== EXECUTING GREEDY STRATEGY ===")
-        
-        # Get current status
-        status = self.client.get_status()
-        morties_remaining = status['morties_in_citadel']
-        
-        print(f"Starting with {morties_remaining} Morties in Citadel")
-        
-        # Determine best planet from exploration
-        best_planet, best_planet_name = self.collector.get_best_planet(
-            self.exploration_data,
-            consider_trend=True
-        )
-        
-        print(f"Best planet identified: {best_planet_name}")
-        print(f"Sending all remaining Morties to {best_planet_name}...")
-        
-        trips_made = 0
-        
-        while morties_remaining > 0:
-            # Determine how many to send
-            morties_to_send = min(morties_per_trip, morties_remaining)
-            
-            # Send Morties
-            result = self.client.send_morties(best_planet, morties_to_send)
-            
-            morties_remaining = result['morties_in_citadel']
-            trips_made += 1
-            
-            if trips_made % 50 == 0:
-                print(f"  Progress: {trips_made} trips, "
-                      f"{result['morties_on_planet_jessica']} saved, "
-                      f"{morties_remaining} remaining")
-        
-        # Final status
-        final_status = self.client.get_status()
-        print("\n=== FINAL RESULTS ===")
-        print(f"Morties Saved: {final_status['morties_on_planet_jessica']}")
-        print(f"Morties Lost: {final_status['morties_lost']}")
-        print(f"Total Steps: {final_status['steps_taken']}")
-        print(f"Success Rate: {(final_status['morties_on_planet_jessica']/1000)*100:.2f}%")
+class StatsWithAllPlanetsOnlyProbsEval(MortyRescueStrategy):
 
-
-class IdiotStrategy(MortyRescueStrategy):
-    def execute_strategy(self, batch_size: int = 3, window_size: int = 30):
-        """
-        Stratégie "idiote" améliorée :
-        - Envoie 3 Mortys sur chaque planète au départ.
-        - Puis envoie toujours sur la planète avec le meilleur taux de survie
-          calculé sur les 30 derniers Mortys envoyés sur chaque planète.
-        """
-        print("\n=== EXECUTING SMARTER IDIOT STRATEGY ===")
-
-        client = self.client
-        try:
-            status = client.get_status()
-            morties_remaining = status['morties_in_citadel']
-            print(f"✓ Connected to API — {morties_remaining} Mortys available.")
-        except Exception as e:
-            print(f"✗ Error initializing API: {e}")
-            return
-
-        collector = DataCollector(client)
-        planet_ids = [0, 1, 2]
-        planet_names = ["Planet A", "Planet B", "Planet C"]
-
-        # Journal des envois
-        all_data = pd.DataFrame(columns=['planet', 'sent', 'survived'])
-
-        print("\n=== INITIAL EXPLORATION ===")
-        for pid in planet_ids:
-            if morties_remaining <= 0:
-                break
-            morties_to_send = min(batch_size, morties_remaining)
-            result = client.send_morties(pid, morties_to_send)
-            survived = result['survived']
-
-            all_data.loc[len(all_data)] = [pid, morties_to_send, survived]
-            morties_remaining = result['morties_in_citadel']
-
-            print(f"  → Sent {morties_to_send} to {planet_names[pid]} | Survived: {survived}")
-
-        round_idx = 1
-        while morties_remaining > 0:
-            print(f"\n=== ROUND {round_idx} ===")
-
-            survival_rates = {}
-            for pid in planet_ids:
-                # Sélection des derniers envois pour cette planète
-                recent_rows = all_data[all_data['planet'] == pid].tail(window_size // batch_size)
-                if len(recent_rows) == 0:
-                    survival_rates[pid] = 0
-                    continue
-
-                sent_recent = recent_rows['sent'].sum()
-                survived_recent = recent_rows['survived'].sum()
-                survival_rates[pid] = survived_recent / sent_recent if sent_recent > 0 else 0
-
-            # Affichage des taux récents
-            for pid, rate in survival_rates.items():
-                print(f"  {planet_names[pid]} → recent survival rate: {rate*100:.2f}%")
-
-            # Choisir la meilleure planète sur la base des 30 derniers Mortys
-            best_planet = max(survival_rates, key=survival_rates.get)
-            best_rate = survival_rates[best_planet]
-            print(f"\n  🚀 Sending next batch to {planet_names[best_planet]} ({best_rate*100:.2f}%)")
-
-            morties_to_send = min(batch_size, morties_remaining)
-            result = client.send_morties(best_planet, morties_to_send)
-            survived = result['survived']
-            morties_remaining = result['morties_in_citadel']
-
-            all_data.loc[len(all_data)] = [best_planet, morties_to_send, survived]
-
-            round_idx += 1
-
-        # Fin de partie
-        final_status = client.get_status()
-        print("\n=== FINAL RESULTS ===")
-        print(f"Morties Saved: {final_status['morties_on_planet_jessica']}")
-        print(f"Morties Lost: {final_status['morties_lost']}")
-        print(f"Total Steps: {final_status['steps_taken']}")
-        print(f"Success Rate: {(final_status['morties_on_planet_jessica']/1000)*100:.2f}%")
-
-        all_data.to_csv("idiot_strategy_log.csv", index=False)
-        print("\n✓ Saved log to idiot_strategy_log.csv")
-
-# ===== Réseau DQN =====
-class DQN(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_size=128):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, output_dim)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-# ===== Mémoire de replay =====
-Transition = namedtuple("Transition", ("state", "action", "reward", "next_state", "done"))
-
-class ReplayMemory:
-    def __init__(self, capacity=5000):
-        self.memory = deque(maxlen=capacity)
-
-    def push(self, *args):
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
-
-    def __len__(self):
-        return len(self.memory)
-
-class DQNAllocationStrategy(MortyRescueStrategy):
-    def __init__(self, client: SphinxAPIClient):
-        super().__init__(client)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # DQN hyperparams
-        self.state_dim = 3    # (x, y, z)
-        self.action_dim = 3   # choix de planète
-        self.gamma = 0.95
-        self.lr = 1e-3
-        self.batch_size = 32
-        self.epsilon = 1.0
-        self.epsilon_min = 0.05
-        self.epsilon_decay = 0.995
-
-        self.batch_send = 9  # nombre de mortys envoyés à chaque action
-
-        # Réseaux
-        self.policy_net = DQN(self.state_dim, self.action_dim).to(self.device)
-        self.target_net = DQN(self.state_dim, self.action_dim).to(self.device)
-        self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.target_net.eval()
-
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.lr)
-        self.memory = ReplayMemory()
-
-    def select_action(self, state):
-        if random.random() < self.epsilon:
-            return random.randrange(self.action_dim)
-        with torch.no_grad():
-            q_values = self.policy_net(torch.FloatTensor(state).unsqueeze(0).to(self.device))
-            return q_values.argmax().item()
-
-    def optimize_model(self):
-        if len(self.memory) < self.batch_size:
-            return
-
-        transitions = self.memory.sample(self.batch_size)
-        batch = Transition(*zip(*transitions))
-
-        state_batch = torch.FloatTensor(batch.state).to(self.device)
-        action_batch = torch.LongTensor(batch.action).unsqueeze(1).to(self.device)
-        reward_batch = torch.FloatTensor(batch.reward).to(self.device)
-        next_state_batch = torch.FloatTensor(batch.next_state).to(self.device)
-        done_batch = torch.FloatTensor(batch.done).to(self.device)
-
-        q_values = self.policy_net(state_batch).gather(1, action_batch).squeeze(1)
-        next_q_values = self.target_net(next_state_batch).max(1)[0]
-        target_values = reward_batch + self.gamma * next_q_values * (1 - done_batch)
-
-        loss = nn.MSELoss()(q_values, target_values.detach())
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-    def execute_strategy(self, sync_target_every=10):
-        print("\n=== EXECUTING DQN ALLOCATION STRATEGY ===")
+    def execute_strategy(self, eta=0.2, last_results_size_C=8, last_results_size_B=6, last_results_size_A=4):
 
         client = self.client
         status = client.get_status()
-        morties_remaining = status['morties_in_citadel']
-        collector = DataCollector(client)
+
+        morties_remaining = status["morties_in_citadel"]
 
         planet_names = ["Planet A", "Planet B", "Planet C"]
-        state = np.array([0, 0, 0], dtype=np.float32)
-        total_sent = 0
-        step = 0
-        history = []
+        #Période des différentes planètes:
+        periods = {0: 10, 1: 20, 2: 200}
 
-        while total_sent < 1000:
-            # Normaliser l’état
-            state_norm = state / 1000.0
+        #Liste des résultats récents pour chaque planète:
+        recent = {0: [], 1: [], 2: []}
 
-            # Choix d'action (planète)
-            action = self.select_action(state_norm)
-            planet = action
+        #Taille des tableaux des récents résultats:
+        window = {0: last_results_size_A, 1: last_results_size_B, 2: last_results_size_C}
 
-            # Envoyer les mortys
-            morties_to_send = min(self.batch_send, 1000 - total_sent)
-            result1 = client.send_morties(int(planet), int(min(morties_to_send, 3)))
-            new_morties_to_send = morties_to_send - min(morties_to_send, 3)
-            if new_morties_to_send <= 0:
-                survived = result1['survived']
+        #Booléen informant si une planète a été initialisée:
+        initialized = {0: False, 1: False, 2: False}
+
+        #Pour chaque planète, un dictionnaire contenant pour chaque step la probabilité de survivre
+        good_cycles = {0: {}, 1: {}, 2: {}}
+
+        #Définis si une planète est sur une winstreak
+        winstreak = {0: False, 1: False, 2: False}
+
+        #Définis si une fin de cycle doit être détectée
+        close_window = {0: False, 1: False, 2: False}
+
+        total_steps = 0
+
+        best_pid = None
+        best_prob = (0, None)
+
+
+        #Petits paramètres d'optimisation lors de la détection du cycle de la planète C
+        count_streak_C = 0
+        send_3 = True
+
+        #Chargement des probas de survie
+        prob_A = np.array([0.1, 0.2, 0.4, 0.7, 1., 1., 0.7, 0.4, 0.2, 0.1])
+        if os.path.exists("prob_A.npy"):
+            prob_A = np.load("prob_A.npy")
+
+        prob_B = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.3, 0.5, 0.7, 0.9, 1., 1., 0.9, 0.7, 0.5, 0.3, 0.1, 0.1, 0.1, 0.1, 0.1])
+        if os.path.exists("prob_B.npy"):
+            prob_B = np.load("prob_B.npy")
+
+        prob_C = np.array([1.]*55 + [0.9]*10 + [0.7]*10 + [0.5]*10 + [0.3]*10 + [0.1]*105)
+        if os.path.exists("prob_C.npy"):
+            prob_C = np.load("prob_C.npy")
+
+        #Mettre a jour le tableau des récents résultats
+        def update_recent(pid, survived):
+            recent[pid].append(survived)
+            if len(recent[pid]) > window[pid]:
+                recent[pid].pop(0)
+
+        #Détecte la fin de cycle
+        def window_closed(pid):
+            """The planet is now in its bad period."""
+            print(f"Recents values: {recent[pid]}")
+            if len(recent[pid]) < window[pid]:
+                return False
+            if pid == 2:
+                return sum(recent[pid]) <= max(window[pid] // 2, 2)
             else:
-                result2 = client.send_morties(int(planet), int(min(new_morties_to_send, 3)))
-                new_morties_to_send -= min(new_morties_to_send, 3)
-                if new_morties_to_send <= 0:
-                    survived = result1['survived'] + result2['survived']
+                return sum(recent[pid]) <= window[pid]-1
+
+        #Définis les probabilités pour chaque planète
+        def record_good_period(pid, end_step):
+            period = periods[pid]
+            if pid == 0:
+                middle = end_step - 5
+                while middle <= 1010:
+                    good_cycles[pid][middle] =  (prob_A[4], 4)
+                    good_cycles[pid][middle + 1] = (prob_A[5], 5)
+                    good_cycles[pid][middle + 2] = (prob_A[6], 6)
+                    good_cycles[pid][middle - 1] = (prob_A[3], 3)
+                    good_cycles[pid][middle + 3] = (prob_A[7], 7)
+                    good_cycles[pid][middle - 2] = (prob_A[2], 2)
+                    good_cycles[pid][middle + 4] = (prob_A[8], 8)
+                    good_cycles[pid][middle - 3] = (prob_A[1], 1)
+                    good_cycles[pid][middle + 5] = (prob_A[9], 9)
+                    good_cycles[pid][middle - 4] = (prob_A[0], 0)
+                    middle += 10
+            elif pid == 1:
+                middle = end_step - 6
+                while middle <= 1020:
+                    good_cycles[pid][middle] = (prob_B[9], 9)
+                    good_cycles[pid][middle + 1] = (prob_B[10], 10)
+                    good_cycles[pid][middle - 1] = (prob_B[8], 8)
+                    good_cycles[pid][middle + 2] = (prob_B[11], 11)
+                    good_cycles[pid][middle - 2] = (prob_B[7], 7)
+                    good_cycles[pid][middle + 3] = (prob_B[12], 12)
+                    good_cycles[pid][middle - 3] = (prob_B[6], 6)
+                    good_cycles[pid][middle + 4] = (prob_B[13], 13)
+                    good_cycles[pid][middle - 4] = (prob_B[5], 5)
+                    good_cycles[pid][middle + 5] = (prob_B[14], 14)
+                    good_cycles[pid][middle - 5] = (prob_B[4], 4)
+                    good_cycles[pid][middle + 6] = (prob_B[15], 15)
+                    good_cycles[pid][middle - 6] = (prob_B[3], 3)
+                    good_cycles[pid][middle + 7] = (prob_B[16], 16)
+                    good_cycles[pid][middle - 7] = (prob_B[2], 2)
+                    good_cycles[pid][middle + 8] = (prob_B[17], 17)
+                    good_cycles[pid][middle - 8] = (prob_B[1], 1)
+                    good_cycles[pid][middle + 9] = (prob_B[18], 18)
+                    good_cycles[pid][middle - 9] = (prob_B[0], 0)
+                    good_cycles[pid][middle + 10] = (prob_B[19], 19)
+                    middle += 20
+            else:
+                middle = end_step - period//4 + 10
+                while middle <= 1200:
+                    good_cycles[pid][middle] =(min(prob_C[0] + 0.05, 1.), 0)
+                    for i in range(1, 99):
+                        j=2*i
+                        if i <= 5:
+                            val1 = min(prob_C[j] + 0.05, 1.)
+                            val2 = min(prob_C[j+1] + 0.05, 1.)
+                        else:
+                            val1 = prob_C[j]
+                            val2 = prob_C[j+1]
+                        good_cycles[pid][middle + i] = (val1, j)
+                        good_cycles[pid][middle - i] = (val2, j+1)
+                    good_cycles[pid][middle - 100] = (prob_C[199], 199)
+                    middle += 200
+            initialized[pid] = True
+            close_window[pid] = False
+            winstreak[pid] = False
+
+        while morties_remaining > 0:
+            
+            ### CHOIX PLANETE
+
+            best_pid = None
+            best_prob = (-1, None)
+            
+            #Détection de la meilleure planète en terme de probabilités
+            for pid in (0, 1, 2):
+                prob = good_cycles[pid].get(total_steps, (0.0, None))  # par défaut 0 si pas de valeur
+                if prob[0] > best_prob[0]:
+                    best_prob = prob
+                    best_pid = pid
+
+            #Si personne n'est en winstreak, qu'aucun cycle ne doit être fermé, et que la meilleure proba est plus de 0.8, on prend la planète associée
+            if not any(winstreak.values()) and not any(close_window.values()) and best_prob[0] >= 0.8:
+                best_pid = best_pid
+                best_prob = best_prob
+                
+            else:
+                #Si toutes les planètes n'ont pas été initialisées
+                if not all(initialized.values()):
+                    best_prob = (0, None)
+                    #On vérifie d'abord si un cycle doit être fermé. Le cas échéant, on choisit la planète associée.
+                    if close_window[2]:
+                        count_streak_C += 1
+                        best_pid = 2
+                    elif close_window[1]:
+                        best_pid = 1
+                    elif close_window[0]:
+                        best_pid = 0
+                    #Si une planète est en winstreak, on continue dessus jusqu'à détecter un cycle.
+                    elif winstreak[2]:
+                        best_pid = 2
+                    elif winstreak[1]:
+                        best_pid = 1
+                    elif winstreak[0]:
+                        best_pid = 0
+                    else:
+                        #On prend aléatoirement une planète non initialisée qu'on teste
+                        candidates = [pid for pid in (2,1,0) if not initialized[pid]]
+                        if len(candidates) == 1:
+                            best_pid = candidates[0]
+                        elif len(candidates) == 2:
+                            if total_steps % 2 == 0:
+                                best_pid = candidates[0]
+                            else:
+                                best_pid = candidates[1]
+                        else:
+                            if total_steps % 2 == 0:
+                                best_pid = 2
+                            else:
+                                if total_steps % 4 == 1:
+                                    best_pid = 0
+                                else:
+                                    best_pid = 1
                 else:
-                    result3 = client.send_morties(int(planet), int(min(new_morties_to_send, 3)))
-                    survived = result1['survived'] + result2['survived'] + result3['survived']
+                    #Si toutes les planètes ont été initialisées, on prend la meilleure proba
+                    best_prob = best_prob
+                    best_pid = best_pid
 
-            # Calcul de la récompense
-            reward = survived / morties_to_send
-            done = (total_sent + morties_to_send) >= 1000
+            ### CHOIX NOMBRE MORTIES A ENVOYER
+            #Si on est sur A ou B et qu'on est sur winstreak, on envoie 3 (optimisation sur un bon épisode)
+            if winstreak[best_pid] and not close_window[best_pid] and not best_pid == 2:
+                send = min(3, morties_remaining)
+            #Si on cherche la fin de cycle de C, et qu'on a pas encore croisé de 0, on envoie 3, sinon, 1.
+            elif not initialized[best_pid] and best_pid == 2 and count_streak_C < 40:
+                if send_3:
+                    send = min(3, morties_remaining)
+                else:
+                    send = 1
+            #Sur la planete A, on envoie jamais 3. Sur les autres, on envoie si la proba vaut plus de 0.8
+            elif best_prob[0] > 0.8 and best_pid != 0:
+                send = min(3, morties_remaining)
+            #On envoie 2 si la proba est plus de 0.7
+            elif best_prob[0] > 0.7:
+                send = min(2, morties_remaining)
+            else:
+                send = 1
+            print(f"Step {total_steps+1}: Sending {send} to {planet_names[best_pid]} with prob {best_prob[0]}")
+            result = client.send_morties(best_pid, send)
 
-            # État suivant
-            next_state = state.copy()
-            next_state[planet] += morties_to_send
+            survived = int(result["survived"])
 
-            # Stocker transition
-            self.memory.push(state_norm, action, reward, next_state / 1000.0, done)
-            self.optimize_model()
+            print(f"Survived: {survived}")
+            if not survived and best_pid == 2 and close_window[2]:
+                send_3 = False
 
-            # Mettre à jour
-            state = next_state
-            total_sent += morties_to_send
-            step += 1
+            #Initialisation winstreak
+            if survived and not initialized[best_pid]:
+                winstreak[best_pid] = True
+            else:
+                winstreak[best_pid] = False
 
-            if step % sync_target_every == 0:
-                self.target_net.load_state_dict(self.policy_net.state_dict())
+            morties_remaining = result["morties_in_citadel"]
 
-            self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+            update_recent(best_pid, survived)
+            
+            if initialized[best_pid]:
+                ### MISE A JOUR PROBABILITES
+                eta = eta
+                P_min = 0.05
 
-            print(f"Step {step}: Sent {morties_to_send} to {planet_names[planet]} | "
-                  f"Reward={reward:.2f} | State={state.tolist()} | ε={self.epsilon:.3f}")
+                reward = survived
 
-            history.append({
-                'step': step,
-                'planet': planet,
-                'sent': morties_to_send,
-                'survived': survived,
-                'reward': reward,
-                'epsilon': self.epsilon
-            })
+                # Période de la planète
+                period = periods[best_pid]
 
-        pd.DataFrame(history).to_csv("dqn_allocation_log.csv", index=False)
-        print("\n✓ Saved training log to dqn_allocation_log.csv")
+                # Step actuel utilisé pour l'apprentissage
+                base_step = total_steps
 
-def run_strategy(strategy_class, explore_trips: int = 30):
-    """
-    Run a complete strategy from exploration to execution.
-    
-    Args:
-        strategy_class: Strategy class to use
-        explore_trips: Number of exploration trips per planet
-    """
-    # Initialize client and strategy
+                # On met à jour tous les steps futurs équivalents dans le cycle
+                # (step + k*period)
+                step_to_update = base_step
+                while step_to_update <= 1000:   # limite arbitraire, ajustable
+                    old_p = good_cycles[best_pid].get(step_to_update, (0.0, None))
+
+                    # Policy gradient simple : P ← P + η * (reward − P)
+                    advantage = reward - old_p[0]
+                    new_p = (old_p[0] + eta * advantage, old_p[1])
+
+                    new_val = max(P_min, min(1.0, new_p[0]))
+                    new_p = (new_val, new_p[1])
+
+                    good_cycles[best_pid][step_to_update] = new_p
+
+                    if best_pid == 0:
+                        prob_A[old_p[1]] = new_p[0]
+                    elif best_pid == 1:
+                        prob_B[old_p[1]] = new_p[0]
+                    else:
+                        prob_C[old_p[1]] = new_p[0]
+
+                    step_to_update += period
+
+            total_steps += 1
+
+            #Si on est sur une bonne winstreak, on commence à chercher la fin du cycle
+            if sum(recent[best_pid]) > window[best_pid] - 1 and not initialized[best_pid]:
+                close_window[best_pid] = True
+
+
+            # Détection de la fin de la première bonne période
+            if not initialized[best_pid] and close_window[best_pid] and window_closed(best_pid):
+                record_good_period(best_pid, total_steps)
+
+        # ----------------------------------------
+        # FINAL
+        # ----------------------------------------
+        #Sauvegarde des probabilités
+        if len(prob_A) != 0:
+            np.save("prob_A.npy", prob_A)
+        if len(prob_B) != 0:
+            np.save("prob_B.npy",prob_B)
+        if len(prob_C) != 0:
+            np.save("prob_C.npy",prob_C)
+        final = client.get_status()
+        print("\n=== FINAL RESULTS ===")
+        print(final)
+
+        return (final["morties_on_planet_jessica"] / 1000) * 100
+
+def run_strategy(strategy_class):
     client = SphinxAPIClient()
-    strategy = strategy_class(client)
-    
-    # Start new episode
-    print("Starting new episode...")
     client.start_episode()
-    
-    # Exploration phase
-    strategy.explore_phase(trips_per_planet=explore_trips)
-    
-    # Analyze results
-    analysis = strategy.analyze_planets()
-    print("\nPlanet Analysis:")
-    for planet_name, data in analysis.items():
-        print(f"  {planet_name}: {data['overall_survival_rate']:.2f}% "
-              f"({data['trend']})")
-    
-    # Execute strategy
-    strategy.execute_strategy()
-
+    strategy = strategy_class(client)
+    rate = strategy.execute_strategy(eta = 0.2, last_results_size_C=8, last_results_size_B=6, last_results_size_A=4)
+    print(f"Rate: {rate:.4f}")
 
 if __name__ == "__main__":
     print("Morty Express Challenge - Strategy Module")
@@ -420,5 +392,4 @@ if __name__ == "__main__":
     print("3. Use self.client to interact with the API")
     print("4. Use self.collector to analyze data")
     
-    # Uncomment to run:
-    run_strategy(DQNAllocationStrategy, explore_trips=10)
+    run_strategy(StatsWithAllPlanetsOnlyProbsEval)
